@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
+import time
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -13,7 +14,6 @@ from tensorflow import convert_to_tensor
 import flwr as fl
 from flwr.common import Metrics
 from flwr.simulation.ray_transport.utils import enable_tf_gpu_growth
-
 
 # Define the stacked LSTM model 
 def get_model_stacked():
@@ -54,7 +54,6 @@ class FlowerClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         """Train parameters on the locally held training set."""
-
         # Update local model parameters
         self.model.set_weights(parameters)
 
@@ -96,6 +95,8 @@ class FlowerClient(fl.client.NumPyClient):
 
 # Function that prepares the input for Centralised models
 def train_test_validate_centr(data, meters):
+
+    
 
     for i in range(0, meters):
 
@@ -191,7 +192,7 @@ def train_test_validate(data, meters, clients):
         train_l.append(train)
         val_l.append(valid)
 
-    return {"train": train_l, "test": test.reset_index(drop=True), "validation": val_l}
+    return {"train": train_l.reset_index(drop=True), "test": test.reset_index(drop=True), "validation": val_l.reset_index(drop=True)}
 
 
 def get_client_fn(partition, model):
@@ -209,10 +210,10 @@ def get_client_fn(partition, model):
         valset = partition["validation"][int(cid)] 
 
         # Split into features and targets and transform into tensors 
-        x_train_tensor = convert_to_tensor(np.asarray(trainset.drop(columns=['KWH/hh (per hour) '])))
-        y_train_tensor = convert_to_tensor(np.asarray(trainset['KWH/hh (per hour) ']))
-        x_val_tensor = convert_to_tensor(np.asarray(valset.drop(columns=['KWH/hh (per hour) '])))
-        y_val_tensor = convert_to_tensor(np.asarray(valset['KWH/hh (per hour) ']))
+        x_train_tensor = convert_to_tensor(np.asarray(trainset.drop(columns=['KWH/hh (per hour)'])))
+        y_train_tensor = convert_to_tensor(np.asarray(trainset['KWH/hh (per hour)']))
+        x_val_tensor = convert_to_tensor(np.asarray(valset.drop(columns=['KWH/hh (per hour)'])))
+        y_val_tensor = convert_to_tensor(np.asarray(valset['KWH/hh (per hour)']))
 
         # Create and return client
         return FlowerClient(x_train_tensor, y_train_tensor, x_val_tensor, y_val_tensor, model).to_client()
@@ -242,16 +243,16 @@ def get_evaluate_fn(testset, verbose, model):
     ):
         
         model.set_weights(parameters)  # Update model with the latest parameters
-        results = model.evaluate(convert_to_tensor(np.asarray(testset.drop(columns=['KWH/hh (per hour) ']))), 
-                                 convert_to_tensor(np.asarray(testset['KWH/hh (per hour) '])), 
+        results = model.evaluate(convert_to_tensor(np.asarray(testset.drop(columns=['KWH/hh (per hour)']))), 
+                                 convert_to_tensor(np.asarray(testset['KWH/hh (per hour)'])), 
                                  verbose=verbose)
         return results[0], {"accuracy": results[1]}
 
     return evaluate
 
 # Plots results of the Federated models
-def plots_of_simulation_fed(history, scenario, num_meters, num_clients=0):
-
+def plots_of_simulation_fed(history, scenario, num_meters, num_clients=0, training_time=None):
+    log.write(f"{scenario} --> metrics_distributed {np.average(history.metrics_distributed['accuracy'])} --> losses_distributed {np.average(history.losses_distributed)} --> metrics_centralized {np.average(history.metrics_centralized['accuracy'])} --> losses_centralized {np.average(history.losses_centralized)}")
     global_accuracy_centralised = history.metrics_distributed["accuracy"]
     global_loss_centralised = history.losses_distributed
     rounds = [data[0] for data in global_accuracy_centralised]
@@ -274,7 +275,7 @@ def plots_of_simulation_fed(history, scenario, num_meters, num_clients=0):
     # Update layout
     fig.update_layout(
         height=800,  # Height of the figure
-        title_text=f"FEDERATED SMART METERS - {num_meters} clients with {num_clients} sampled clients per round",
+        title_text=f"FEDERATED SMART METERS - {num_meters} clients with {num_clients} sampled clients per round\nTraining time: {training_time:.2f} seconds",
     )
 
     # Update x-axis for all subplots
@@ -288,7 +289,7 @@ def plots_of_simulation_fed(history, scenario, num_meters, num_clients=0):
     fig.write_html(f'images/{name}.html')
 
 # Plots results of the centralised models
-def plots_of_simulation_cen(history, scenario, num_meters):
+def plots_of_simulation_cen(history, scenario, num_meters, training_time=None):
     rounds = np.arange(0,len(history.history['loss']))
     loss = history.history['loss']
     acc = history.history['mean_absolute_error']
@@ -311,7 +312,7 @@ def plots_of_simulation_cen(history, scenario, num_meters):
     # Update layout
     fig.update_layout(
         height=800,  # Height of the figure
-        title_text=name,
+        title_text=f"{name}\nTraining time: {training_time:.2f} seconds",
     )
 
     # Update x-axis for all subplots
@@ -325,6 +326,7 @@ def plots_of_simulation_cen(history, scenario, num_meters):
 
 
 def run_federated(df_dataset, num_clients, num_meters, verbose, scenario, fraction_fit, fraction_evaluate, model, num_rounds=10):
+    start_time = time.time()
 
     enable_tf_gpu_growth()
 
@@ -345,7 +347,7 @@ def run_federated(df_dataset, num_clients, num_meters, verbose, scenario, fracti
 
     # With a dictionary, you tell Flower's VirtualClientEngine that each
     # client needs exclusive access to these many resources in order to run
-    client_resources = {"num_cpus": 20.0}
+    client_resources = {"num_cpus": 8.0}
 
     # Start simulation
     history = fl.simulation.start_simulation(
@@ -359,97 +361,89 @@ def run_federated(df_dataset, num_clients, num_meters, verbose, scenario, fracti
                 # does nothing if `num_gpus` in client_resources is 0.0
             },
     )
+    end_time = time.time()
+    training_time = end_time - start_time
 
-    plots_of_simulation_fed(history, scenario, num_meters, num_clients)
+    plots_of_simulation_fed(history, scenario, num_meters, num_clients, training_time=training_time)
 
 def run_centralized(df_dataset, num_meters, VERBOSE, scenario, model):
+    start_time = time.time()
 
     if '80' in scenario:
-        #randomly drop 20% od columns from train
-        rows_to_drop = df_dataset["train"].sample(frac=0.2).index
-        df_dataset["train"].drop(rows_to_drop, inplace=True)
+        #randomly drop 20% of columns
+        rows_to_drop_training = df_dataset["train"].sample(frac=0.2).index
+        df_dataset["train"].drop(rows_to_drop_training, inplace=True).reset_index(drop=True)
+        rows_to_drop_test = df_dataset["test"].sample(frac=0.2).index
+        df_dataset["test"].drop(rows_to_drop_test, inplace=True).reset_index(drop=True)
+        rows_to_drop_validation = df_dataset["validation"].sample(frac=0.2).index
+        df_dataset["validation"].drop(rows_to_drop_validation, inplace=True).reset_index(drop=True)
     elif 'column' in scenario:
         #drop is_weekend column
         df_dataset["train"].drop(columns=['is_weekend'], inplace=True)
+        df_dataset["test"].drop(columns=['is_weekend'], inplace=True)
+        df_dataset["validation"].drop(columns=['is_weekend'], inplace=True)
+    elif 'missing_hour' in scenario:
+        # Drop consistently the same hour from all the partitions
+        df_dataset["train"] = df_dataset["train"][df_dataset["train"]["hour"] != 18].reset_index(drop=True)
+        df_dataset["test"] = df_dataset["test"][df_dataset["test"]["hour"] != 18].reset_index(drop=True)
+        df_dataset["validation"] = df_dataset["validation"][df_dataset["validation"]["hour"] != 18].reset_index(drop=True)
 
     # Convert data to tensors
-    x_train_tensor = convert_to_tensor(np.asarray(df_dataset["train"].drop(columns=['KWH/hh (per hour) '])))
-    y_train_tensor = convert_to_tensor(np.asarray(df_dataset["train"]['KWH/hh (per hour) ']))
-    x_val_tensor = convert_to_tensor(np.asarray(df_dataset["validation"].drop(columns=['KWH/hh (per hour) '])))
-    y_val_tensor = convert_to_tensor(np.asarray(df_dataset["validation"]['KWH/hh (per hour) ']))
-    x_test_tensor = convert_to_tensor(np.asarray(df_dataset["test"].drop(columns=['KWH/hh (per hour) '])))
-    y_test_tensor = convert_to_tensor(np.asarray(df_dataset["test"]['KWH/hh (per hour) ']))
+    x_train_tensor = convert_to_tensor(np.asarray(df_dataset["train"].drop(columns=['KWH/hh (per hour)'])))
+    y_train_tensor = convert_to_tensor(np.asarray(df_dataset["train"]['KWH/hh (per hour)']))
+    x_val_tensor = convert_to_tensor(np.asarray(df_dataset["validation"].drop(columns=['KWH/hh (per hour)'])))
+    y_val_tensor = convert_to_tensor(np.asarray(df_dataset["validation"]['KWH/hh (per hour)']))
+    x_test_tensor = convert_to_tensor(np.asarray(df_dataset["test"].drop(columns=['KWH/hh (per hour)'])))
+    y_test_tensor = convert_to_tensor(np.asarray(df_dataset["test"]['KWH/hh (per hour)']))
 
     history = model.fit(x_train_tensor, y_train_tensor, validation_data=(x_val_tensor, y_val_tensor), epochs=10, batch_size=512, verbose=VERBOSE)
+    end_time = time.time()
+    training_time = end_time - start_time
 
-    model.evaluate(x_test_tensor, y_test_tensor, verbose=VERBOSE)
+    results = model.evaluate(x_test_tensor, y_test_tensor, verbose=VERBOSE)
+    log.write(f"{scenario} --> {results}")
     
-    plots_of_simulation_cen(history, scenario, num_meters)
+    plots_of_simulation_cen(history, scenario, num_meters, training_time=training_time)
 
+log = open("logging_file","w")
 
 def main():
 
-    scenarios = ['centralized_all_data', 'centralized_80pr_training_data', 'centralized_removed_column', 'federated']
+    scenarios = ['centralized_missing_hour', 'centralized_80pr_training_data', 'centralized_removed_column', 'centralized_all_data','federated']
 
-    dataset = pd.read_csv("Preprocessed_data.csv", dtype={'LCLid': np.int16, 'KWH/hh (per hour) ': np.float64, 'dayoftheyear': np.int16,
+    dataset = pd.read_csv("Preprocessed_data.csv", dtype={'LCLid': np.int16, 'KWH/hh (per hour)': np.float64, 'dayoftheyear': np.int16,
        'hour': np.int8, 'is_weekend': np.int8})
 
     all_meters = dataset['LCLid'].max() + 1
 
     scenarios_meters_clients = {
         50: {'clients': [30, 50], 'params': [0.5, 0.1]},
-        100: {'clients': [30, 100], 'params': [0.2, 0.1]}
-       # all_meters: {'clients': [100], 'params': [0.2, 0.1]}
+        100: {'clients': [30, 100], 'params': [0.2, 0.1]},
+        all_meters: {'clients': [100], 'params': [0.2, 0.1]}
     }
 
     VERBOSE = 0
 
     models = {'simple': get_model_simple(), 
               'stacked': get_model_stacked()}
-
-    for model_name, model in models.items():
-        
-        print(model_name.capitalize())
-        for scenario in scenarios:
-            name_scenario = f'{scenario}_{model_name}'
-            print(name_scenario)
-            for meters, othr in scenarios_meters_clients.items():
-                print(meters)
-                if 'federated' in scenario:
-                    for client in othr['clients']:
-                        df_dataset = train_test_validate(dataset, client, meters)
-                        run_federated(df_dataset, client, meters, VERBOSE, name_scenario, fraction_fit = othr['params'][0], fraction_evaluate= othr['params'][1], model=model)
-                elif 'centralized' in scenario:
-                    df_dataset = train_test_validate_centr(dataset, meters)
-                    run_centralized(df_dataset, meters, VERBOSE, name_scenario, model=model) 
-
-    # ALL METERS
-    for model_name, model in models.items():
-        print(model_name.capitalize())
-        for scenario in scenarios:
-            name_scenario = f'{scenario}_{model_name}'
-            print(name_scenario)
-            print(all_meters)
-            if 'federated' in scenario:
-                df_dataset = train_test_validate(dataset, 100, all_meters)
-                run_federated(df_dataset, 100, all_meters, VERBOSE, name_scenario, fraction_fit = 0.1, fraction_evaluate = 0.05, model=model)
-            elif 'centralized' in scenario:
-                    df_dataset = train_test_validate_centr(dataset, all_meters)
-                    run_centralized(df_dataset, all_meters, VERBOSE, name_scenario, model=model) 
-
-def all_meters_func():
-    models = {'simple': get_model_simple(), 
-              'stacked': get_model_stacked()}
-
-    dataset = pd.read_csv("Preprocessed_data.csv", dtype={'LCLid': np.int16, 'KWH/hh (per hour) ': np.float64, 'dayoftheyear': np.int16,
-       'hour': np.int8, 'is_weekend': np.int8})
-
-    all_meters = dataset['LCLid'].max() + 1
-
-    df_dataset = train_test_validate(dataset, 100, all_meters)
     
-    run_federated(df_dataset, 1000, all_meters, 0, "federated", fraction_fit = 0.01, fraction_evaluate = 0.005, model=models['simple'])
-    #run_federated(df_dataset, all_meters, all_meters, 0, "federated", fraction_fit = 0.1, fraction_evaluate = 0.05, model=models['stacked'])
+    for i in range(0,10):
+        for model_name, model in models.items():
+            
+            print(model_name.capitalize())
+            for scenario in scenarios:
+                name_scenario = f'{scenario}_{model_name}_run{i}'
+                print(name_scenario)
+                for meters, othr in scenarios_meters_clients.items():
+                    print(meters)
+                    if 'federated' in scenario:
+                        for client in othr['clients']:
+                            df_dataset = train_test_validate(dataset, client, meters)
+                            run_federated(df_dataset, client, meters, VERBOSE, name_scenario, fraction_fit = othr['params'][0], fraction_evaluate= othr['params'][1], model=model)
+                    elif 'centralized' in scenario:
+                        df_dataset = train_test_validate_centr(dataset, meters)
+                        run_centralized(df_dataset, meters, VERBOSE, name_scenario, model=model) 
 
-#main()
-all_meters_func()
+main()
+
+log.close()
